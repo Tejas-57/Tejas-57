@@ -1,6 +1,6 @@
 - 👋 Hi, I’m @Tejas-57
-- 👀 I’m interested in Financial Engineering.
-- 🌱 I’m currently learning Mathematical modelling and computation in finance.
+- 👀 I’m interested in Portfolio Analytics and Financial Engineering.
+- 🌱 I’m currently developing portfolio strategies and optimization models using statistical algorithms & machine learning.
 - 📫 Reach me through tejas996b@gmail.com
 
 <!---
