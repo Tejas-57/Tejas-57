@@ -1,0 +1,233 @@
+import numpy as np
+import pandas as pd
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
+
+# Load historical price data for the 6 securities
+data = pd.read_csv('Smart b (6 securities pf data).csv', index_col='Date', parse_dates=True)
+data = data.apply(pd.to_numeric, errors='coerce')  # Ensure all data is numeric
+returns = data.pct_change().dropna()
+
+# Load Nifty 50 and NSE 500 data from a single CSV file
+nifty_nse500_data = pd.read_csv('Nifty50_NSE500.csv', index_col='Date', parse_dates=True)
+nifty_nse500_data = nifty_nse500_data.apply(pd.to_numeric, errors='coerce')  # Ensure all data is numeric
+nifty_returns = nifty_nse500_data['Nifty 50'].pct_change(fill_method=None).dropna()
+nse500_returns = nifty_nse500_data['NSE 500'].pct_change(fill_method=None).dropna()
+
+# Define the risk-free rate
+annual_risk_free_rate = 0.07  # Annual risk-free rate
+daily_risk_free_rate = annual_risk_free_rate / 252  # Daily risk-free rate
+
+# Define the objective function (negative Sharpe Ratio)
+def negative_sharpe_ratio(weights, mean_returns, cov_matrix, risk_free_rate):
+    portfolio_return = np.dot(weights, mean_returns)   # Not Annualize returns
+    portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))   # Not Annualize volatility
+    sharpe_ratio = (portfolio_return - risk_free_rate) / portfolio_volatility  # not Adjust for annualized risk-free rate
+    return -sharpe_ratio
+
+# Define the constraint functions
+def weight_constraint(weights):
+    return np.sum(weights) - 1
+
+'''def std_dev_constraint(weights, mean_returns, cov_matrix):
+    portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))  # Not annualized
+    annualized_volatility = portfolio_volatility * np.sqrt(252)  # Convert to annualized volatility
+    return 0.15 - annualized_volatility  # Ensure it does not exceed 15%'''
+
+# Define the bounds
+num_assets = len(returns.columns)
+bounds = tuple((0.05, 0.40) for _ in range(num_assets))
+
+# Generate 6-month period start and end dates
+periods = []
+current_date = pd.to_datetime('2005-07-01')
+while current_date <= returns.index[-1]:
+    if current_date.month == 7:
+        end_date = current_date + pd.DateOffset(months=6) - pd.DateOffset(days=1)
+        end_date = end_date.replace(day=1) + pd.offsets.MonthEnd(0)
+    else:
+        end_date = current_date + pd.DateOffset(months=6) - pd.DateOffset(days=1)
+        end_date = end_date.replace(day=1) + pd.offsets.MonthEnd(0)
+
+    if end_date > returns.index[-1]:
+        end_date = returns.index[-1]
+
+    periods.append((current_date, end_date))
+    current_date = end_date + pd.DateOffset(days=1)
+
+# Adjust start and end dates to nearest available trading days
+adjusted_periods = []
+for start_date, end_date in periods:
+    if start_date not in returns.index:
+        start_date = returns.index[returns.index.searchsorted(start_date)]
+    if end_date not in returns.index:
+        end_date = returns.index[returns.index.searchsorted(end_date) - 1]
+    adjusted_periods.append((start_date, end_date))
+
+# Initialize portfolio value
+initial_investment = 10000000
+portfolio_values = [initial_investment]
+
+# Initialize daily portfolio values
+daily_portfolio_values = pd.Series(index=returns.index, data=np.nan)
+daily_portfolio_values.iloc[0] = initial_investment
+
+current_portfolio_value = initial_investment
+
+optimal_weights_6m = []
+
+# Initialize a list to store contributions for each 6-month period
+security_contributions = []
+
+for start_date, end_date in adjusted_periods:
+    end_data = returns[(returns.index >= start_date) & (returns.index <= end_date)]
+    
+    if len(end_data) > 0:
+        # Calculate mean returns and covariance matrix for the 6-month period
+        mean_returns = end_data.mean()
+        cov_matrix = end_data.cov()
+
+        # Define the initial guess (equal weights)
+        initial_guess = num_assets * [1. / num_assets,]
+
+        # Define the constraints
+        constraints = (
+            {'type': 'eq', 'fun': weight_constraint},)  # Sum of weights must be 1
+        
+        # Perform the optimization
+        result = minimize(negative_sharpe_ratio, initial_guess, args=(mean_returns, cov_matrix, daily_risk_free_rate),
+                          method='SLSQP', bounds=bounds, constraints=constraints)
+
+        # Extract the optimal weights
+        optimal_weights = result.x
+
+        # Initialize dictionary to store contribution of each security
+        contribution_dict = {'Start Date': start_date, 'End Date': end_date}
+        
+        # Calculate the portfolio's weighted average returns for the 6-month period
+        portfolio_returns = np.dot(end_data, optimal_weights)
+        
+        # Calculate initial values for each security at the start of the period
+        initial_values = optimal_weights * current_portfolio_value
+
+        # Calculate absolute return contribution of each security
+        for i, security in enumerate(end_data.columns):
+            security_return = np.prod(1 + end_data[security]) - 1  # Calculate the total return of the security
+            contribution = initial_values[i] * (1+security_return ) # Contribution to the portfolio
+            contribution_dict[security] = contribution
+
+        # Calculate the portfolio value and update the daily portfolio values
+        period_start_value = current_portfolio_value
+        for date in end_data.index:
+            daily_return = np.dot(end_data.loc[date], optimal_weights)
+            current_portfolio_value *= (1 + daily_return)
+            daily_portfolio_values[date] = current_portfolio_value
+            
+        
+        # Calculate and store total portfolio return for the period
+        period_end_value = current_portfolio_value
+        period_return = (period_end_value - period_start_value) / period_start_value
+
+        # Store the optimal weights and metrics
+        optimal_weights_6m.append({
+            'Start Date': start_date,
+            'End Date': end_date,
+            'Optimal Weights': optimal_weights,
+            '6-Month Period Return (%)': period_return * 100,  # Convert to percentage
+            'Avg Portfolio Return (%)': np.mean(portfolio_returns) * 100,  # Convert to percentage
+            'Portfolio Std Dev (%)': np.std(portfolio_returns) * np.sqrt(126) * 100,  # Convert to percentage
+            'Sharpe Ratio': (period_return - (annual_risk_free_rate / 2)) / (np.std(portfolio_returns) * np.sqrt(126)),
+        })
+
+        # Append the contribution dictionary to the list
+        security_contributions.append(contribution_dict)
+        
+
+# Rebase the Nifty 50 and NSE 500 cumulative returns to the initial investment
+nifty_cumulative_values = (1 + nifty_returns).cumprod() * initial_investment
+nse500_cumulative_values = (1 + nse500_returns).cumprod() * initial_investment
+
+# Define crore formatter function
+def crore_formatter(x, pos):
+    return f'{x:.0f} Cr'
+
+# Plot portfolio growth
+plt.figure(figsize=(12, 8))
+plt.plot(daily_portfolio_values.index, daily_portfolio_values / 1e7, label='BR Multi-Factor Portfolio')
+plt.plot(nifty_cumulative_values.index, nifty_cumulative_values / 1e7, label='Nifty 50')
+plt.plot(nse500_cumulative_values.index, nse500_cumulative_values / 1e7, label='NSE 500')
+
+#plt.plot(daily_portfolio_values.index, daily_portfolio_values / 1e7, label='BR Smart-Beta Portfolio',color='#AA336A' )
+#plt.plot(nifty_cumulative_values.index, nifty_cumulative_values / 1e7, label='Nifty 50',color='green')
+#plt.plot(nse500_cumulative_values.index, nse500_cumulative_values / 1e7, label='NSE 500',color ='#ffA500')
+
+
+plt.xlabel('Year')
+plt.ylabel('Portfolio Value (Crores)')
+plt.gca().yaxis.set_major_formatter(FuncFormatter(crore_formatter))
+plt.gca().yaxis.set_major_locator(plt.MultipleLocator(20))  # Set major ticks at 20 crore intervals
+plt.title('Portfolio Growth Over Time')
+plt.legend(loc='upper left')
+
+# Annotate initial investment
+initial_value = initial_investment / 1e7
+plt.annotate(f'{initial_value:.2f} Cr', 
+             xy=(daily_portfolio_values.index[0], initial_value), 
+             xytext=(daily_portfolio_values.index[0], initial_value + 2),
+             fontsize=12, 
+             ha='center')
+
+# Annotate final values
+final_opt_value = daily_portfolio_values.iloc[-1] / 1e7
+plt.annotate(f'{final_opt_value:.2f} Cr', 
+             xy=(daily_portfolio_values.index[-1], final_opt_value), 
+             xytext=(daily_portfolio_values.index[-1], final_opt_value + 2),
+             fontsize=12, 
+             ha='center')
+
+final_nifty_value = nifty_cumulative_values.iloc[-1] / 1e7
+plt.annotate(f'{final_nifty_value:.2f} Cr', 
+             xy=(nifty_cumulative_values.index[-1], final_nifty_value), 
+             xytext=(nifty_cumulative_values.index[-1], final_nifty_value + 2),
+             fontsize=12, 
+             ha='center')
+
+final_nse500_value = nse500_cumulative_values.iloc[-1] / 1e7
+plt.annotate(f'{final_nse500_value:.2f} Cr', 
+             xy=(nse500_cumulative_values.index[-1], final_nse500_value), 
+             xytext=(nse500_cumulative_values.index[-1], final_nse500_value + 4),
+             fontsize=12, 
+             ha='center')
+
+plt.show()
+
+# Display final portfolio value and cumulative returns 
+final_portfolio_value = daily_portfolio_values.iloc[-1]
+#print(f"Final Portfolio Value: {final_portfolio_value:.2f}")
+
+# Calculate overall portfolio returns, CAGR, standard deviation, and Sharpe ratio
+total_return = (final_portfolio_value / initial_investment) - 1
+cagr = (final_portfolio_value / initial_investment) ** (1 / (len(daily_portfolio_values) / 252)) - 1
+overall_std_dev = daily_portfolio_values.pct_change().std() * np.sqrt(252)
+overall_sharpe_ratio = (cagr - annual_risk_free_rate) / overall_std_dev
+
+#print(f"Optimized Portfolio Cumulative Return: {total_return:.2%}")
+print(f"Optimized Portfolio CAGR: {cagr:.2%}")
+print(f"Optimized Portfolio Standard Deviation: {overall_std_dev:.2%}")
+print(f"Optimized Portfolio Sharpe Ratio: {overall_sharpe_ratio:.2f}")
+
+# Create DataFrame for optimal weights and 6-month period returns
+weights_df = pd.DataFrame(optimal_weights_6m)
+weights_df.to_csv('optimal_weights_and_returns.csv', index=False)
+
+#print("Optimal weights and returns saved to 'optimal_weights_and_returns.csv'.")
+
+daily_pf_NAV = pd.DataFrame(daily_portfolio_values)
+daily_pf_NAV.to_csv("Daily PF NAV.csv")
+
+# Create DataFrame for security contributions and save to CSV
+contributions_df = pd.DataFrame(security_contributions)
+contributions_df.to_csv('security_contributions.csv', index=False)
+
+print("Security contributions saved to 'security_contributions.csv'.")
